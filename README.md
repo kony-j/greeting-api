@@ -88,6 +88,8 @@ greeting-api가 http://localhost:3000 에서 실행 중입니다.
 $env:PORT=4000; npm run dev
 ```
 
+> ⚠️ **필수**: `API_KEY` 환경변수를 설정하지 않으면 서버가 시작되지 않습니다. 아래 "5. 보안" 항목을 먼저 확인하세요.
+
 ### 타입 검사만 실행
 
 ```powershell
@@ -146,28 +148,79 @@ Response:
   ```json
   { "error": "name은 1~50자의 비어있지 않은 문자열이어야 합니다." }
   ```
+- `x-api-key` 헤더가 없거나 올바르지 않으면 `401 Unauthorized`
+  ```json
+  { "error": "유효한 API 키가 필요합니다. 'x-api-key' 헤더를 확인하세요." }
+  ```
 - 존재하지 않는 경로는 `404 Not Found`
 - 서버 내부 오류는 `500 Internal Server Error`
 
 ### curl로 테스트하기 (PowerShell)
 
+`GET /`(헬스체크)를 제외한 모든 `/api/greet` 요청에는 `x-api-key` 헤더가 필요합니다. 아래 예시는 `.env`에 `API_KEY=my-secret-key`를 설정했다고 가정합니다.
+
 ```powershell
 curl http://localhost:3000/
-curl http://localhost:3000/api/greet/홍길동
-curl "http://localhost:3000/api/greet?name=주인"
-curl -Method POST -Uri http://localhost:3000/api/greet -Body '{"name":"클로드"}' -ContentType "application/json"
+curl -H "x-api-key: my-secret-key" http://localhost:3000/api/greet/홍길동
+curl -H "x-api-key: my-secret-key" "http://localhost:3000/api/greet?name=주인"
+curl -Method POST -Uri http://localhost:3000/api/greet -Headers @{ "x-api-key" = "my-secret-key" } -Body '{"name":"클로드"}' -ContentType "application/json"
 ```
 
 > PowerShell의 `curl`은 `Invoke-WebRequest`의 별칭이라 옵션 형식이 다를 수 있습니다. 실제 `curl.exe`를 쓰고 싶다면 `curl.exe`로 명시하거나, VS Code 확장으로 [REST Client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client) 같은 확장을 설치해 `.http` 파일로 테스트하는 것도 편합니다.
 
 ---
 
-## 4. 프로젝트 구조
+## 4. 보안 (HTTPS + API 키)
+
+이 API는 두 가지 보안 장치를 적용합니다.
+
+1. **통신 암호화 (HTTPS)** — TLS 인증서가 설정되면 `https` 서버로 실행됩니다.
+2. **인증 (API 키)** — `GET /`(헬스체크)를 제외한 모든 요청은 `x-api-key` 헤더가 서버에 설정된 `API_KEY`와 일치해야 통과합니다. 키가 없으면 서버가 아예 시작되지 않습니다(fail-closed).
+
+### API 키 설정
+
+```powershell
+# 무작위 키 생성 (PowerShell)
+$bytes = New-Object byte[] 32
+(New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+[Convert]::ToHexString($bytes)
+```
+
+생성한 값을 `.env`의 `API_KEY`에 넣으세요. 이 키는 절대 커밋하지 마세요(`.env`는 `.gitignore`에 포함되어 있습니다).
+
+### 로컬 개발용 HTTPS (자체 서명 인증서)
+
+`TLS_CERT_PATH`/`TLS_KEY_PATH`를 설정하지 않으면 개발 편의를 위해 HTTP로 실행되며 콘솔에 경고가 출력됩니다. 로컬에서 HTTPS를 직접 테스트하려면 자체 서명 인증서를 만들어 사용할 수 있습니다 (Git for Windows에 포함된 `openssl` 또는 WSL 사용).
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout key.pem -out cert.pem -days 365 -subj "/CN=localhost"
+```
+
+`.env`에 생성된 파일의 경로를 지정합니다.
+
+```
+TLS_CERT_PATH=C:\path\to\cert.pem
+TLS_KEY_PATH=C:\path\to\key.pem
+```
+
+자체 서명 인증서는 브라우저/curl에서 신뢰되지 않으므로 `curl -k` (또는 브라우저의 "고급 > 계속 진행")로 접속해야 합니다. `key.pem`/`cert.pem`은 저장소에 커밋하지 마세요.
+
+### 프로덕션 배포 시
+
+- `NODE_ENV=production`으로 실행하면 `TLS_CERT_PATH`/`TLS_KEY_PATH` 미설정 시 서버가 시작을 거부합니다.
+- 실제 도메인에는 자체 서명 인증서 대신 [Let's Encrypt](https://letsencrypt.org/) 등 신뢰된 인증서를 사용하거나, Nginx/클라우드 로드밸런서(예: AWS ALB, Cloudflare)에서 TLS를 종료(terminate)하고 내부적으로는 HTTP로 이 서버에 프록시하는 구성도 흔히 사용됩니다.
+- `API_KEY`는 비밀값이므로 소스 코드나 저장소가 아닌 배포 환경의 시크릿 매니저(예: AWS Secrets Manager, GitHub Actions Secrets)를 통해 주입하세요.
+
+---
+
+## 5. 프로젝트 구조
 
 ```
 greeting-api/
 ├── src/
-│   ├── index.ts        # 서버 진입점, 라우팅
+│   ├── index.ts        # 서버 진입점, 라우팅, HTTPS/HTTP 서버 생성
+│   ├── auth.ts          # API 키 검증 (fail-closed, 타이밍 공격 방지)
 │   ├── greeting.ts      # 이름 검증 및 인사말 생성 (순수 함수)
 │   └── http-utils.ts    # JSON 응답/요청 파싱 헬퍼
 ├── package.json
@@ -178,7 +231,7 @@ greeting-api/
 
 ---
 
-## 5. 다음 확장 아이디어
+## 6. 다음 확장 아이디어
 
 이 프로젝트 설명("Hello world 출력 같은 간단한 API를 만들고 점점 확장")에 맞춰, 다음과 같은 방향으로 확장해볼 수 있습니다.
 
@@ -186,7 +239,8 @@ greeting-api/
 - 요청 로깅 미들웨어 추가
 - Jest/Vitest로 `greeting.ts`의 단위 테스트 작성
 - 여러 언어의 인사말 지원 (예: `?lang=en` → `Hello, {name}!`)
-- 데이터베이스 연동, 인증 등 실제 API 기능 추가
+- 요청 속도 제한(rate limiting), API 키별 사용량 추적 등 추가 보안/운영 기능
+- 데이터베이스 연동, 사용자별 API 키 발급/회전(rotation) 등 실제 API 기능 확장
 
 ---
 
